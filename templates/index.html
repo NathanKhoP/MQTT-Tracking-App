@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Fleet Management Dashboard</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+          integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+          crossorigin=""/>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+            integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+            crossorigin=""></script>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 0; padding: 0; display: flex; height: 100vh; }
+        #map { height: 100%; width: 70%; }
+        #sidebar { width: 30%; padding: 10px; overflow-y: auto; box-sizing: border-box; background-color: #f4f4f4; }
+        .vehicle-info { border: 1px solid #ddd; margin-bottom: 10px; padding: 10px; background-color: #fff; }
+        .vehicle-info h3 { margin-top: 0; }
+        .offline { color: red; font-weight: bold; }
+        .online { color: green; font-weight: bold; }
+        .maintenance-log { font-size: 0.9em; color: #555; margin-left: 10px; border-left: 2px solid #ccc; padding-left: 5px;}
+        .alert-item { 
+            background-color: #fff3cd; 
+            border-left: 4px solid #ffd700; 
+            padding: 8px;
+            margin: 5px 0;
+            font-size: 0.9em;
+        }
+        .alert-timestamp {
+            color: #666;
+            font-size: 0.8em;
+        }
+    </style>
+</head>
+<body>
+    <div id="map"></div>
+    <div id="sidebar">
+        <h2>Vehicles</h2>
+        <div id="vehicle-list">
+            <p>Loading vehicle data...</p>
+        </div>
+    </div>
+
+    <script>
+        const map = L.map('map').setView([34.0522, -118.2437], 10); // Default view (e.g., Los Angeles)
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            maxZoom: 19,
+            attribution: '© OpenStreetMap contributors'
+        }).addTo(map);
+
+        const vehicleMarkers = {}; // To store L.marker objects {vehicle_id: marker}
+        const vehicleData = {};   // To store all data {vehicle_id: {location: ..., status: ...}}
+
+        function updateVehicleDisplay(vehicleId, data) {
+            if (!vehicleData[vehicleId]) {
+                vehicleData[vehicleId] = { 
+                    location: null, 
+                    status: null, 
+                    maintenance_logs: [],
+                    alerts: []
+                };
+            }
+
+            if (data.type === "location") {
+                vehicleData[vehicleId].location = data.data;
+            } else if (data.type === "status") {
+                vehicleData[vehicleId].status = data.data;
+            } else if (data.type === "maintenance") {
+                if (!vehicleData[vehicleId].maintenance_logs) {
+                    vehicleData[vehicleId].maintenance_logs = [];
+                }
+                vehicleData[vehicleId].maintenance_logs.push(data.data);
+                vehicleData[vehicleId].maintenance_logs = vehicleData[vehicleId].maintenance_logs.slice(-5);
+            } else if (data.type === "alert") {
+                if (!vehicleData[vehicleId].alerts) {
+                    vehicleData[vehicleId].alerts = [];
+                }
+                vehicleData[vehicleId].alerts.push(data.data);
+                vehicleData[vehicleId].alerts = vehicleData[vehicleId].alerts.slice(-5);
+
+                // Optional: Show a notification when a new alert arrives
+                if (Notification.permission === "granted") {
+                    new Notification(`Alert for ${vehicleId}`, {
+                        body: data.data.message,
+                        icon: '/favicon.ico'
+                    });
+                }
+            }
+
+            const vehicle = vehicleData[vehicleId];
+            const listElement = document.getElementById('vehicle-list');
+            let vehicleDiv = document.getElementById(`vehicle-${vehicleId}`);
+
+            if (!vehicleDiv) {
+                vehicleDiv = document.createElement('div');
+                vehicleDiv.id = `vehicle-${vehicleId}`;
+                vehicleDiv.className = 'vehicle-info';
+                listElement.appendChild(vehicleDiv);
+            }
+
+            let onlineStatus = '<span class="offline">Offline</span>';
+            let fuelInfo = "N/A";
+            let engineStatus = "N/A";
+
+            if (vehicle.status) {
+                onlineStatus = vehicle.status.online ? '<span class="online">Online</span>' : `<span class="offline">Offline (${vehicle.status.reason || 'LWT'})</span>`;
+                fuelInfo = `${vehicle.status.fuel_level}%`;
+                engineStatus = vehicle.status.engine_on ? "On" : "Off";
+            }
+
+            let locationInfo = "Location: N/A";
+            let speedInfo = "Speed: N/A";
+
+            if (vehicle.location) {
+                locationInfo = `Location: ${vehicle.location.latitude.toFixed(4)}, ${vehicle.location.longitude.toFixed(4)}`;
+                speedInfo = `Speed: ${vehicle.location.speed_kmh} km/h`;
+
+                const latLng = [vehicle.location.latitude, vehicle.location.longitude];
+                if (vehicleMarkers[vehicleId]) {
+                    vehicleMarkers[vehicleId].setLatLng(latLng);
+                } else {
+                    vehicleMarkers[vehicleId] = L.marker(latLng).addTo(map);
+                }
+                
+                // Update popup content to include alerts
+                let popupContent = `<b>${vehicleId}</b><br>${speedInfo}<br>Status: ${vehicle.status ? (vehicle.status.online ? 'Online' : 'Offline') : 'Unknown'}`;
+                if (vehicle.alerts && vehicle.alerts.length > 0) {
+                    popupContent += '<br><b>Latest Alert:</b><br>' + vehicle.alerts[vehicle.alerts.length - 1].message;
+                }
+                vehicleMarkers[vehicleId].bindPopup(popupContent);
+
+                if (Object.keys(vehicleMarkers).length === 1) {
+                    map.setView(latLng, 13);
+                }
+            } else if (vehicle.status && !vehicle.status.online && vehicleMarkers[vehicleId]) {
+                // If vehicle is offline and has a marker, maybe grey it out or remove
+                // For now, we just leave it at last known position.
+                // Or remove it: map.removeLayer(vehicleMarkers[vehicleId]); delete vehicleMarkers[vehicleId];
+            }
+
+            // Add alerts section
+            let alertsHTML = "<h4>Active Alerts:</h4>";
+            if (vehicle.alerts && vehicle.alerts.length > 0) {
+                alertsHTML += '<div class="alerts-container">';
+                vehicle.alerts.slice().reverse().forEach(alert => {
+                    alertsHTML += `
+                        <div class="alert-item">
+                            <strong>${alert.alert_type}</strong>
+                            <p>${alert.message}</p>
+                            <span class="alert-timestamp">
+                                ${new Date(alert.timestamp * 1000).toLocaleTimeString()}
+                            </span>
+                        </div>`;
+                });
+                alertsHTML += '</div>';
+            } else {
+                alertsHTML += "<p>No active alerts.</p>";
+            }
+
+            let maintenanceHTML = "<h4>Maintenance Logs (QoS 2):</h4>";
+            if (vehicle.maintenance_logs && vehicle.maintenance_logs.length > 0) {
+                vehicle.maintenance_logs.forEach(log => {
+                    maintenanceHTML += `<div class="maintenance-log">Msg: ${log.message}, ID: ${log.check_id}, TS: ${new Date(log.timestamp * 1000).toLocaleTimeString()}</div>`;
+                });
+            } else {
+                maintenanceHTML += "<p>No recent maintenance logs.</p>";
+            }
+
+            vehicleDiv.innerHTML = `
+                <h3>${vehicleId} - ${onlineStatus}</h3>
+                <p>${locationInfo}</p>
+                <p>${speedInfo}</p>
+                <p>Fuel: ${fuelInfo}</p>
+                <p>Engine: ${engineStatus}</p>
+                ${alertsHTML}
+                ${maintenanceHTML}
+                <p><small>MQTT Topic for this update: ${data.topic || 'N/A'}</small></p>
+                <p><small>Last updated: ${new Date().toLocaleTimeString()}</small></p>
+            `;
+        }
+
+        // Fetch initial data
+        async function fetchInitialData() {
+            try {
+                const response = await fetch('/get_all_data');
+                const allData = await response.json();
+                const vehicleListElement = document.getElementById('vehicle-list');
+                if (Object.keys(allData).length > 0) {
+                     vehicleListElement.innerHTML = ''; // Clear "Loading..."
+                } else {
+                     vehicleListElement.innerHTML = '<p>No vehicle data yet. Make sure simulators are running.</p>';
+                }
+
+                for (const vehicleId in allData) {
+                    const vData = allData[vehicleId];
+                    // Simulate receiving these as individual messages for consistent processing
+                    if (vData.status) {
+                        updateVehicleDisplay(vehicleId, { type: 'status', data: vData.status, topic: `fleet/vehicle/${vehicleId}/status` });
+                    }
+                    if (vData.location) {
+                        updateVehicleDisplay(vehicleId, { type: 'location', data: vData.location, topic: `fleet/vehicle/${vehicleId}/location` });
+                    }
+                    if (vData.maintenance_logs) {
+                        vData.maintenance_logs.forEach(log => {
+                             updateVehicleDisplay(vehicleId, { type: 'maintenance', data: log, topic: `fleet/vehicle/${vehicleId}/maintenance` });
+                        });
+                    }
+                    if (vData.alerts) {
+                        vData.alerts.forEach(alert => {
+                             updateVehicleDisplay(vehicleId, { type: 'alert', data: alert, topic: `fleet/vehicle/${vehicleId}/alert` });
+                        });
+                    }
+                }
+            } catch (error) {
+                console.error("Error fetching initial data:", error);
+                document.getElementById('vehicle-list').innerHTML = '<p>Error loading initial data. Check console.</p>';
+            }
+        }
+
+
+        // Setup SSE
+        const eventSource = new EventSource("/stream");
+
+        eventSource.onmessage = function(event) {
+            console.log("SSE Data:", event.data);
+            const parsedData = JSON.parse(event.data);
+            updateVehicleDisplay(parsedData.vehicle_id, parsedData);
+        };
+
+        eventSource.onerror = function(err) {
+            console.error("EventSource failed:", err);
+            // You might want to add logic to try and reconnect or notify the user
+        };
+        
+        fetchInitialData(); // Load existing data when page loads
+    </script>
+</body>
+</html>
