@@ -37,6 +37,11 @@ def on_connect(client, userdata, flags, rc, properties=None):
     vehicle_id = userdata["vehicle_id"]
     if rc == 0:
         print(f"Vehicle {vehicle_id}: Connected to HiveMQ Broker ({HIVEMQ_HOST})!")
+        # Subscribe to request and ping topics
+        client.subscribe(f"fleet/vehicle/{vehicle_id}/request", qos=1)
+        client.subscribe(f"fleet/vehicle/{vehicle_id}/ping", qos=1)
+        print(f"Vehicle {vehicle_id}: Subscribed to request and ping topics")
+        
         status_payload = {
             "vehicle_id": vehicle_id,
             "engine_on": True,
@@ -59,6 +64,105 @@ def on_publish(client, userdata, mid, properties=None, reason_code=None):
     vehicle_id = userdata["vehicle_id"]
     # print(f"Vehicle {vehicle_id}: Message {mid} published.")
 
+def on_message(client, userdata, msg):
+    """Handle incoming messages like requests and pings"""
+    vehicle_id = userdata["vehicle_id"]
+    topic = msg.topic
+    
+    try:
+        payload = json.loads(msg.payload.decode())
+        topic_parts = topic.split('/')
+        
+        if len(topic_parts) < 4:
+            print(f"Vehicle {vehicle_id}: Unexpected topic format {topic}")
+            return
+            
+        message_type = topic_parts[3]
+        
+        # Handle ping messages (for latency testing)
+        if message_type == "ping":
+            print(f"Vehicle {vehicle_id}: Received ping, sending pong response")
+            request_id = payload.get("request_id")
+            
+            # Prepare pong response with the original request_id
+            pong_payload = {
+                "request_id": request_id,
+                "vehicle_id": vehicle_id,
+                "timestamp": time.time(),
+                "original_timestamp": payload.get("timestamp")
+            }
+            
+            # Publish pong response
+            client.publish(
+                f"fleet/vehicle/{vehicle_id}/ping/pong", 
+                json.dumps(pong_payload), 
+                qos=1
+            )
+            return
+            
+        # Handle vehicle requests
+        if message_type == "request":
+            request_id = payload.get("request_id")
+            request_type = payload.get("request_type")
+            params = payload.get("params", {})
+            
+            print(f"Vehicle {vehicle_id}: Received {request_type} request")
+            
+            # Process different request types
+            response_data = {
+                "request_id": request_id,
+                "vehicle_id": vehicle_id,
+                "timestamp": time.time(),
+                "request_type": request_type,
+                "status": "success"
+            }
+            
+            # Handle different request types
+            if request_type == "diagnostics":
+                # Simulate diagnostic data
+                response_data["data"] = {
+                    "engine_temp": random.uniform(80, 105),
+                    "oil_pressure": random.uniform(35, 65),
+                    "battery_voltage": random.uniform(12.1, 14.2),
+                    "tire_pressure": {
+                        "front_left": random.uniform(30, 36),
+                        "front_right": random.uniform(30, 36),
+                        "rear_left": random.uniform(30, 36),
+                        "rear_right": random.uniform(30, 36)
+                    }
+                }
+            elif request_type == "route_info":
+                # Simulate route information
+                response_data["data"] = {
+                    "current_destination": "Distribution Center",
+                    "eta_minutes": random.randint(10, 45),
+                    "distance_remaining_km": random.uniform(5, 30),
+                    "route_efficiency": f"{random.randint(80, 99)}%"
+                }
+            elif request_type == "driver_info":
+                # Simulate driver information
+                response_data["data"] = {
+                    "driver_id": f"DRV{random.randint(1000, 9999)}",
+                    "name": "John Driver",
+                    "hours_driven_today": random.uniform(1, 8),
+                    "break_status": random.choice(["On Break", "Active", "Required Soon"])
+                }
+            else:
+                # Unknown request type
+                response_data["status"] = "error"
+                response_data["message"] = f"Unknown request type: {request_type}"
+            
+            # Send response
+            client.publish(
+                f"fleet/vehicle/{vehicle_id}/response",
+                json.dumps(response_data),
+                qos=1
+            )
+    except json.JSONDecodeError:
+        print(f"Vehicle {vehicle_id}: Received non-JSON message: {msg.payload}")
+    except Exception as e:
+        print(f"Vehicle {vehicle_id}: Error processing message: {e}")
+
 def simulate_vehicle(vehicle_id_num):
     vehicle_id = f"vehicle_{str(vehicle_id_num).zfill(3)}"
     client_id = f"sim_vehicle_{vehicle_id}"
@@ -79,14 +183,13 @@ def simulate_vehicle(vehicle_id_num):
         "vehicle_id": vehicle_id,
         "online": False,
         "reason": "connection_lost_LWT",
-        "timestamp": time.time()
-    })
+        "timestamp": time.time()    })
     client.will_set(lwt_topic, payload=lwt_payload, qos=1, retain=True)
     print(f"Vehicle {vehicle_id}: LWT set to topic {lwt_topic}")
-
     client.on_connect = on_connect
     client.on_disconnect = on_disconnect
     client.on_publish = on_publish
+    client.on_message = on_message
 
     try:
         client.connect(HIVEMQ_HOST, HIVEMQ_PORT_MQTTS, 60)

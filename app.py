@@ -1,4 +1,4 @@
-from flask import Flask, render_template, Response, g
+from flask import Flask, render_template, Response, g, request, jsonify
 import paho.mqtt.client as mqtt
 import time
 import json
@@ -7,6 +7,7 @@ import threading
 from queue import Queue
 import os # Import os
 from dotenv import load_dotenv # Import load_dotenv
+import uuid # For generating request IDs
 
 # Load environment variables from .env file
 load_dotenv()
@@ -35,6 +36,10 @@ data_lock = threading.Lock()
 sse_queues = []
 sse_queues_lock = threading.Lock()
 
+# Store for pending requests
+pending_requests = {}
+pending_requests_lock = threading.Lock()
+
 def on_connect_dashboard(client, userdata, flags, rc, properties=None):
     if rc == 0:
         print(f"Dashboard: Connected to HiveMQ Broker ({HIVEMQ_HOST})!")
@@ -42,7 +47,9 @@ def on_connect_dashboard(client, userdata, flags, rc, properties=None):
         client.subscribe("fleet/vehicle/+/status", qos=1)
         client.subscribe("fleet/vehicle/+/maintenance", qos=2)
         client.subscribe("fleet/vehicle/+/alert", qos=1)  # Subscribe to alert messages
-        print("Dashboard: Subscribed to fleet/vehicle/+/location, fleet/vehicle/+/status, fleet/vehicle/+/maintenance, fleet/vehicle/+/alert")
+        client.subscribe("fleet/vehicle/+/response", qos=1)  # Subscribe to response messages
+        client.subscribe("fleet/vehicle/+/ping/pong", qos=1)  # Subscribe to ping-pong responses
+        print("Dashboard: Subscribed to fleet topics including response and ping/pong")
     else:
         print(f"Dashboard: Failed to connect, return code {rc}\n")
 
@@ -58,13 +65,75 @@ def on_message_dashboard(client, userdata, msg):
         vehicle_id = topic_parts[2]
         message_type = topic_parts[3]
 
+        # Handle ping-pong response
+        if message_type == "ping" and len(topic_parts) > 4 and topic_parts[4] == "pong":
+            # Process ping-pong response
+            received_time = time.time()
+            request_id = payload_data.get("request_id")
+            
+            with pending_requests_lock:
+                if request_id in pending_requests:
+                    sent_time = pending_requests[request_id]["timestamp"]
+                    latency = (received_time - sent_time) * 1000  # Convert to milliseconds
+                    payload_data["latency_ms"] = round(latency, 2)
+                    payload_data["received_timestamp"] = received_time
+                    
+                    # Update with the complete response including latency
+                    pending_requests[request_id]["response"] = payload_data
+                    pending_requests[request_id]["completed"] = True
+            
+            # Also send this through SSE for real-time UI updates
+            update_message = {"vehicle_id": vehicle_id, "type": "ping_pong", "data": payload_data, "topic": msg.topic}
+            with sse_queues_lock:
+                for q in sse_queues:
+                    q.put(json.dumps(update_message))
+            
+            return
+
+        # Handle regular response to a request
+        if message_type == "response":
+            request_id = payload_data.get("request_id")
+            
+            with pending_requests_lock:
+                if request_id in pending_requests:
+                    pending_requests[request_id]["response"] = payload_data
+                    pending_requests[request_id]["completed"] = True
+            
+            # Add to vehicle data store as a response
+            with data_lock:
+                if vehicle_id not in vehicle_data_store:
+                    vehicle_data_store[vehicle_id] = {
+                        "location": None, 
+                        "status": None, 
+                        "maintenance_logs": [],
+                        "alerts": [],
+                        "responses": []
+                    }
+                
+                if "responses" not in vehicle_data_store[vehicle_id]:
+                    vehicle_data_store[vehicle_id]["responses"] = []
+                
+                vehicle_data_store[vehicle_id]["responses"].append(payload_data)
+                # Keep only the last 5 responses
+                vehicle_data_store[vehicle_id]["responses"] = vehicle_data_store[vehicle_id]["responses"][-5:]
+            
+            # Normal SSE update for UI
+            update_message = {"vehicle_id": vehicle_id, "type": message_type, "data": payload_data, "topic": msg.topic}
+            with sse_queues_lock:
+                for q in sse_queues:
+                    q.put(json.dumps(update_message))
+            
+            return
+
+        # Handle regular data messages
         with data_lock:
             if vehicle_id not in vehicle_data_store:
                 vehicle_data_store[vehicle_id] = {
                     "location": None, 
                     "status": None, 
                     "maintenance_logs": [],
-                    "alerts": []  # Add alerts array
+                    "alerts": [],  # Add alerts array
+                    "responses": [] # Add responses array
                 }
             
             if message_type == "location":
@@ -103,6 +172,9 @@ def mqtt_thread_function():
 
     client.on_connect = on_connect_dashboard
     client.on_message = on_message_dashboard
+    
+    # Store the MQTT client in the Flask application context
+    app.mqtt_client = client
 
     while True:
         try:
@@ -115,6 +187,12 @@ def mqtt_thread_function():
         time.sleep(5)
 
 
+@app.before_request
+def before_request():
+    """Make the MQTT client available to all routes"""
+    g.mqtt_client = getattr(app, 'mqtt_client', None)
+
+
 @app.route('/')
 def index():
     return render_template('index.html')
@@ -123,6 +201,28 @@ def index():
 def get_all_data():
     with data_lock:
         return json.dumps(dict(vehicle_data_store))
+
+@app.route('/api/request_data', methods=['POST'])
+def request_data():
+    request_id = str(uuid.uuid4())
+    requested_vehicles = request.json.get("vehicles", [])
+    response_format = request.json.get("format", "full")
+
+    with pending_requests_lock:
+        pending_requests[request_id] = {
+            "vehicles": requested_vehicles,
+            "format": response_format,
+            "timestamp": time.time()
+        }
+
+    return jsonify({"request_id": request_id}), 202
+
+
+@app.route('/api/pending_requests')
+def get_pending_requests():
+    with pending_requests_lock:
+        requests_copy = pending_requests.copy()
+    return jsonify(requests_copy), 200
 
 
 @app.route('/stream')
@@ -143,6 +243,141 @@ def stream():
                     sse_queues.remove(q)
     return Response(event_stream(), mimetype="text/event-stream")
 
+
+@app.route('/api/send_request', methods=['POST'])
+def send_request():
+    """Send a request to a specific vehicle and wait for response"""
+    try:
+        request_data = request.json
+        vehicle_id = request_data.get('vehicle_id')
+        request_type = request_data.get('request_type')
+        request_params = request_data.get('params', {})
+        timeout_seconds = float(request_data.get('timeout', 10))
+        
+        if not all([vehicle_id, request_type]):
+            return jsonify({'status': 'error', 'message': 'Missing required parameters'}), 400
+        
+        # Create a new request record
+        request_id = str(uuid.uuid4())
+        request_obj = {
+            'vehicle_id': vehicle_id,
+            'request_type': request_type,
+            'params': request_params,
+            'timestamp': time.time(),
+            'completed': False,
+            'response': None
+        }
+        
+        # Prepare message payload
+        message = {
+            'request_id': request_id,
+            'request_type': request_type,
+            'params': request_params,
+            'timestamp': time.time()
+        }
+        
+        # Store the pending request
+        with pending_requests_lock:
+            pending_requests[request_id] = request_obj
+        
+        # Get the mqtt client from the global state
+        client = g.get('mqtt_client')
+        if not client:
+            return jsonify({'status': 'error', 'message': 'MQTT client not available'}), 500
+        
+        # Publish the request
+        topic = f"fleet/vehicle/{vehicle_id}/request"
+        client.publish(topic, json.dumps(message), qos=1)
+        
+        # Wait for the response (with timeout)
+        start_time = time.time()
+        while time.time() - start_time < timeout_seconds:
+            time.sleep(0.1)  # Small sleep to avoid busy waiting
+            with pending_requests_lock:
+                if request_id in pending_requests and pending_requests[request_id]['completed']:
+                    response_data = pending_requests[request_id]['response']
+                    # Clean up the request from our store
+                    del pending_requests[request_id]
+                    return jsonify({
+                        'status': 'success',
+                        'request_id': request_id,
+                        'response': response_data
+                    })
+        
+        # If we get here, the request timed out
+        with pending_requests_lock:
+            if request_id in pending_requests:
+                del pending_requests[request_id]
+        
+        return jsonify({'status': 'timeout', 'message': 'Request timed out'}), 408
+    
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/api/ping', methods=['POST'])
+def ping_vehicle():
+    """Send a ping to measure latency to a vehicle"""
+    try:
+        ping_data = request.json
+        vehicle_id = ping_data.get('vehicle_id')
+        timeout_seconds = float(ping_data.get('timeout', 5))
+        
+        if not vehicle_id:
+            return jsonify({'status': 'error', 'message': 'Vehicle ID required'}), 400
+        
+        # Create a ping request
+        request_id = str(uuid.uuid4())
+        ping_request = {
+            'vehicle_id': vehicle_id,
+            'timestamp': time.time(),
+            'completed': False,
+            'response': None
+        }
+        
+        # Prepare ping message
+        message = {
+            'request_id': request_id,
+            'timestamp': time.time()
+        }
+        
+        # Store the pending request
+        with pending_requests_lock:
+            pending_requests[request_id] = ping_request
+        
+        # Get the mqtt client from the global state
+        client = g.get('mqtt_client')
+        if not client:
+            return jsonify({'status': 'error', 'message': 'MQTT client not available'}), 500
+        
+        # Publish the ping
+        topic = f"fleet/vehicle/{vehicle_id}/ping"
+        client.publish(topic, json.dumps(message), qos=1)
+        
+        # Wait for the pong response (with timeout)
+        start_time = time.time()
+        while time.time() - start_time < timeout_seconds:
+            time.sleep(0.05)  # Small sleep to avoid busy waiting
+            with pending_requests_lock:
+                if request_id in pending_requests and pending_requests[request_id]['completed']:
+                    response_data = pending_requests[request_id]['response']
+                    # Clean up the request from our store
+                    del pending_requests[request_id]
+                    return jsonify({
+                        'status': 'success',
+                        'latency_ms': response_data.get('latency_ms'),
+                        'request_id': request_id
+                    })
+        
+        # If we get here, the ping timed out
+        with pending_requests_lock:
+            if request_id in pending_requests:
+                del pending_requests[request_id]
+        
+        return jsonify({'status': 'timeout', 'message': 'Ping timed out'}), 408
+    
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+    
 
 if __name__ == '__main__':
     mqtt_thread = threading.Thread(target=mqtt_thread_function, daemon=True)

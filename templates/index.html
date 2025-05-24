@@ -9,8 +9,7 @@
           crossorigin=""/>
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
             integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
-            crossorigin=""></script>
-    <style>
+            crossorigin=""></script>    <style>
         body { font-family: Arial, sans-serif; margin: 0; padding: 0; display: flex; height: 100vh; }
         #map { height: 100%; width: 70%; }
         #sidebar { width: 30%; padding: 10px; overflow-y: auto; box-sizing: border-box; background-color: #f4f4f4; }
@@ -30,11 +29,98 @@
             color: #666;
             font-size: 0.8em;
         }
+        .response-item {
+            background-color: #e3f2fd;
+            border-left: 4px solid #2196f3;
+            padding: 8px;
+            margin: 5px 0;
+            font-size: 0.9em;
+        }
+        .controls-panel {
+            background-color: #fff;
+            border: 1px solid #ddd;
+            padding: 15px;
+            margin-bottom: 15px;
+            border-radius: 5px;
+        }
+        .controls-panel h3 {
+            margin-top: 0;
+            border-bottom: 1px solid #eee;
+            padding-bottom: 8px;
+        }
+        button {
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            padding: 8px 12px;
+            text-align: center;
+            cursor: pointer;
+            border-radius: 4px;
+            margin: 5px 0;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+        button:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+        select, input {
+            padding: 5px;
+            margin: 5px 0;
+            border-radius: 4px;
+            border: 1px solid #ddd;
+        }
+        .ping-result {
+            font-weight: bold;
+            font-size: 1.1em;
+            margin-top: 5px;
+        }
+        .loading {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 3px solid rgba(255,255,255,.3);
+            border-radius: 50%;
+            border-top-color: #45a049;
+            animation: spin 1s ease-in-out infinite;
+            margin-left: 10px;
+            vertical-align: middle;
+        }
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
     </style>
 </head>
-<body>
-    <div id="map"></div>
+<body>    <div id="map"></div>
     <div id="sidebar">
+        <div class="controls-panel">
+            <h3>Vehicle Controls</h3>
+            <div>
+                <label for="vehicle-select">Select Vehicle:</label>
+                <select id="vehicle-select">
+                    <option value="">Loading vehicles...</option>
+                </select>
+            </div>
+            
+            <div style="margin-top: 10px;">
+                <h4>Latency Test (Ping)</h4>
+                <button id="ping-btn" disabled>Ping Vehicle</button>
+                <div id="ping-result"></div>
+            </div>
+            
+            <div style="margin-top: 15px;">
+                <h4>Request Information</h4>
+                <select id="request-type">
+                    <option value="diagnostics">Vehicle Diagnostics</option>
+                    <option value="route_info">Route Information</option>
+                    <option value="driver_info">Driver Information</option>
+                </select>
+                <button id="send-request-btn" disabled>Send Request</button>
+                <div id="request-result"></div>
+            </div>
+        </div>
+        
         <h2>Vehicles</h2>
         <div id="vehicle-list">
             <p>Loading vehicle data...</p>
@@ -51,13 +137,134 @@
         const vehicleMarkers = {}; // To store L.marker objects {vehicle_id: marker}
         const vehicleData = {};   // To store all data {vehicle_id: {location: ..., status: ...}}
 
+        // Vehicle controls elements
+        const vehicleSelect = document.getElementById('vehicle-select');
+        const pingBtn = document.getElementById('ping-btn');
+        const pingResult = document.getElementById('ping-result');
+        const requestTypeSelect = document.getElementById('request-type');
+        const sendRequestBtn = document.getElementById('send-request-btn');
+        const requestResult = document.getElementById('request-result');
+
+        // Initialize controls
+        function initControls() {
+            // Update the vehicle selector
+            vehicleSelect.innerHTML = '';
+            const vehicles = Object.keys(vehicleData);
+            
+            if (vehicles.length === 0) {
+                vehicleSelect.innerHTML = '<option value="">No vehicles available</option>';
+                pingBtn.disabled = true;
+                sendRequestBtn.disabled = true;
+            } else {
+                vehicles.forEach(vehicleId => {
+                    const option = document.createElement('option');
+                    option.value = vehicleId;
+                    option.textContent = vehicleId;
+                    vehicleSelect.appendChild(option);
+                });
+                pingBtn.disabled = false;
+                sendRequestBtn.disabled = false;
+            }
+        }
+
+        // Ping a vehicle
+        async function pingVehicle() {
+            const selectedVehicle = vehicleSelect.value;
+            if (!selectedVehicle) {
+                alert('Please select a vehicle first');
+                return;
+            }
+
+            try {
+                pingResult.innerHTML = 'Pinging vehicle... <div class="loading"></div>';
+                pingBtn.disabled = true;
+
+                const response = await fetch('/api/ping', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        vehicle_id: selectedVehicle,
+                        timeout: 5
+                    })
+                });
+
+                const data = await response.json();
+                
+                if (response.ok) {
+                    if (data.status === 'success') {
+                        pingResult.innerHTML = `<span class="ping-result">Latency: ${data.latency_ms.toFixed(2)} ms</span>`;
+                    } else {
+                        pingResult.textContent = `Error: ${data.message || 'Request timed out'}`;
+                    }
+                } else {
+                    pingResult.textContent = `Error: ${data.message || 'Failed to ping vehicle'}`;
+                }
+            } catch (error) {
+                console.error('Ping error:', error);
+                pingResult.textContent = 'Error: Failed to send ping request';
+            } finally {
+                pingBtn.disabled = false;
+            }
+        }
+
+        // Send a request to a vehicle
+        async function sendRequest() {
+            const selectedVehicle = vehicleSelect.value;
+            const requestType = requestTypeSelect.value;
+            
+            if (!selectedVehicle) {
+                alert('Please select a vehicle first');
+                return;
+            }
+
+            try {
+                requestResult.innerHTML = 'Sending request... <div class="loading"></div>';
+                sendRequestBtn.disabled = true;
+
+                const response = await fetch('/api/send_request', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        vehicle_id: selectedVehicle,
+                        request_type: requestType,
+                        params: {},
+                        timeout: 10
+                    })
+                });
+
+                const data = await response.json();
+                
+                if (response.ok && data.status === 'success') {
+                    // Format response data as JSON
+                    const formattedData = JSON.stringify(data.response, null, 2);
+                    requestResult.innerHTML = `<pre style="background:#f8f8f8;padding:10px;border-radius:4px;overflow:auto;max-height:200px;">${formattedData}</pre>`;
+                } else {
+                    requestResult.textContent = `Error: ${data.message || 'Request failed or timed out'}`;
+                }
+            } catch (error) {
+                console.error('Request error:', error);
+                requestResult.textContent = 'Error: Failed to send request';
+            } finally {
+                sendRequestBtn.disabled = false;
+            }
+        }
+
+        // Add event listeners to buttons
+        pingBtn.addEventListener('click', pingVehicle);
+        sendRequestBtn.addEventListener('click', sendRequest);
+
         function updateVehicleDisplay(vehicleId, data) {
             if (!vehicleData[vehicleId]) {
                 vehicleData[vehicleId] = { 
                     location: null, 
                     status: null, 
                     maintenance_logs: [],
-                    alerts: []
+                    alerts: [],
+                    responses: []  // Add responses array
                 };
             }
 
@@ -85,6 +292,19 @@
                         icon: '/favicon.ico'
                     });
                 }
+            } else if (data.type === "response") {
+                // Handle response messages
+                if (!vehicleData[vehicleId].responses) {
+                    vehicleData[vehicleId].responses = [];
+                }
+                vehicleData[vehicleId].responses.push(data.data);
+                vehicleData[vehicleId].responses = vehicleData[vehicleId].responses.slice(-5);
+            } else if (data.type === "ping_pong") {
+                // Handle ping-pong responses directly in the UI
+                if (data.data.latency_ms) {
+                    pingResult.innerHTML = `<span class="ping-result">Latency: ${data.data.latency_ms.toFixed(2)} ms</span>`;
+                    pingBtn.disabled = false;
+                }
             }
 
             const vehicle = vehicleData[vehicleId];
@@ -96,6 +316,9 @@
                 vehicleDiv.id = `vehicle-${vehicleId}`;
                 vehicleDiv.className = 'vehicle-info';
                 listElement.appendChild(vehicleDiv);
+                
+                // Update controls when a new vehicle is added
+                initControls();
             }
 
             let onlineStatus = '<span class="offline">Offline</span>';
@@ -157,6 +380,25 @@
                 alertsHTML += "<p>No active alerts.</p>";
             }
 
+            // Add responses section
+            let responsesHTML = "<h4>Recent Responses:</h4>";
+            if (vehicle.responses && vehicle.responses.length > 0) {
+                responsesHTML += '<div class="responses-container">';
+                vehicle.responses.slice().reverse().forEach(response => {
+                    responsesHTML += `
+                        <div class="response-item">
+                            <strong>Request Type: ${response.request_type}</strong>
+                            <p>Status: ${response.status}</p>
+                            <span class="alert-timestamp">
+                                ${new Date(response.timestamp * 1000).toLocaleTimeString()}
+                            </span>
+                        </div>`;
+                });
+                responsesHTML += '</div>';
+            } else {
+                responsesHTML += "<p>No recent responses.</p>";
+            }
+
             let maintenanceHTML = "<h4>Maintenance Logs (QoS 2):</h4>";
             if (vehicle.maintenance_logs && vehicle.maintenance_logs.length > 0) {
                 vehicle.maintenance_logs.forEach(log => {
@@ -173,6 +415,7 @@
                 <p>Fuel: ${fuelInfo}</p>
                 <p>Engine: ${engineStatus}</p>
                 ${alertsHTML}
+                ${responsesHTML}
                 ${maintenanceHTML}
                 <p><small>MQTT Topic for this update: ${data.topic || 'N/A'}</small></p>
                 <p><small>Last updated: ${new Date().toLocaleTimeString()}</small></p>
@@ -210,7 +453,15 @@
                              updateVehicleDisplay(vehicleId, { type: 'alert', data: alert, topic: `fleet/vehicle/${vehicleId}/alert` });
                         });
                     }
+                    if (vData.responses) {
+                        vData.responses.forEach(response => {
+                             updateVehicleDisplay(vehicleId, { type: 'response', data: response, topic: `fleet/vehicle/${vehicleId}/response` });
+                        });
+                    }
                 }
+                
+                // Initialize vehicle controls after loading data
+                initControls();
             } catch (error) {
                 console.error("Error fetching initial data:", error);
                 document.getElementById('vehicle-list').innerHTML = '<p>Error loading initial data. Check console.</p>';
