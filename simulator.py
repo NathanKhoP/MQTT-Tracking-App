@@ -20,6 +20,9 @@ HIVEMQ_USERNAME = os.getenv("HIVEMQ_USERNAME")
 HIVEMQ_PASSWORD = os.getenv("HIVEMQ_PASSWORD")
 CA_CERT_PATH = os.getenv("CA_CERT_PATH") # Will be None if not set in .env
 
+# Flow Control Configuration for MQTT 5
+RECEIVE_MAXIMUM = 20  # Maximum number of unacknowledged PUBLISH messages
+
 # Check if essential variables are loaded
 if not all([HIVEMQ_HOST, HIVEMQ_USERNAME, HIVEMQ_PASSWORD]):
     print("Error: Missing HiveMQ credentials in .env file or environment variables.")
@@ -37,6 +40,14 @@ def on_connect(client, userdata, flags, rc, properties=None):
     vehicle_id = userdata["vehicle_id"]
     if rc == 0:
         print(f"Vehicle {vehicle_id}: Connected to HiveMQ Broker ({HIVEMQ_HOST})!")
+        
+        # Check Flow Control properties from the broker
+        if properties and hasattr(properties, 'ReceiveMaximum'):
+            broker_receive_max = properties.ReceiveMaximum
+            print(f"Vehicle {vehicle_id}: Broker set Receive Maximum to {broker_receive_max}")
+        else:
+            print(f"Vehicle {vehicle_id}: Broker did not specify Receive Maximum, using default")
+        
         # Subscribe to request and ping topics
         client.subscribe(f"fleet/vehicle/{vehicle_id}/request", qos=1)
         client.subscribe(f"fleet/vehicle/{vehicle_id}/ping", qos=1)
@@ -168,7 +179,8 @@ def simulate_vehicle(vehicle_id_num):
     client_id = f"sim_vehicle_{vehicle_id}"
 
     userdata = {"vehicle_id": vehicle_id}
-    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=client_id, userdata=userdata)
+    # Using MQTT 5.0 protocol
+    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=client_id, userdata=userdata, protocol=mqtt.MQTTv5)
 
     client.username_pw_set(HIVEMQ_USERNAME, HIVEMQ_PASSWORD)
 
@@ -177,6 +189,11 @@ def simulate_vehicle(vehicle_id_num):
         cert_reqs=ssl.CERT_REQUIRED,
         tls_version=ssl.PROTOCOL_TLS_CLIENT
     )
+
+    # Set up Flow Control using Connect Properties
+    connect_properties = Properties(PacketTypes.CONNECT)
+    connect_properties.ReceiveMaximum = RECEIVE_MAXIMUM
+    print(f"Vehicle {vehicle_id}: Setting Receive Maximum to {RECEIVE_MAXIMUM}")
 
     lwt_topic = f"fleet/vehicle/{vehicle_id}/status"
     lwt_payload = json.dumps({
@@ -192,7 +209,8 @@ def simulate_vehicle(vehicle_id_num):
     client.on_message = on_message
 
     try:
-        client.connect(HIVEMQ_HOST, HIVEMQ_PORT_MQTTS, 60)
+        # Connect with Flow Control properties
+        client.connect(HIVEMQ_HOST, HIVEMQ_PORT_MQTTS, 60, properties=connect_properties)
     except Exception as e:
         print(f"Vehicle {vehicle_id}: Connection failed: {e}")
         return
@@ -276,7 +294,25 @@ def simulate_vehicle(vehicle_id_num):
         print(f"Vehicle {vehicle_id}: Disconnected.")
 
 
+def flow_control_explanation():
+    """
+    This function explains how MQTT 5 Flow Control improves communication efficiency
+    """
+    print("\n--- MQTT 5 Flow Control Explanation ---")
+    print(f"This simulator uses MQTT 5 Flow Control with Receive Maximum set to: {RECEIVE_MAXIMUM}")
+    print("Benefits of Flow Control:")
+    print("1. Prevents clients from being overwhelmed with messages")
+    print("2. Reduces memory usage by limiting unacknowledged messages")
+    print("3. Improves stability for devices with limited resources")
+    print("4. Provides better control over message flow between clients and broker")
+    print("5. Allows different devices to set appropriate limits based on their capabilities")
+    print("--------------------------------------\n")
+
+
 if __name__ == "__main__":
+    # Show flow control explanation
+    flow_control_explanation()
+    
     threads = []
     for i in range(1, NUM_VEHICLES + 1):
         thread = threading.Thread(target=simulate_vehicle, args=(i,))
