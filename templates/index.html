@@ -29,6 +29,43 @@
             color: #666;
             font-size: 0.8em;
         }
+        .user-controls {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            z-index: 1000;
+            background-color: white;
+            padding: 5px 10px;
+            border-radius: 4px;
+            box-shadow: 0 1px 5px rgba(0,0,0,0.2);
+        }
+        .logout-btn {
+            background-color: #f44336;
+            color: white;
+            border: none;
+            padding: 5px 10px;
+            border-radius: 3px;
+            cursor: pointer;
+            font-size: 14px;
+        }
+        .logout-btn:hover {
+            background-color: #d32f2f;
+        }
+        .username-display {
+            margin-right: 10px;
+            font-weight: bold;
+        }
+        .alert-item { 
+            background-color: #fff3cd; 
+            border-left: 4px solid #ffd700; 
+            padding: 8px;
+            margin: 5px 0;
+            font-size: 0.9em;
+        }
+        .alert-timestamp {
+            color: #666;
+            font-size: 0.8em;
+        }
         .response-item {
             background-color: #e3f2fd;
             border-left: 4px solid #2196f3;
@@ -92,7 +129,12 @@
         }
     </style>
 </head>
-<body>    <div id="map"></div>
+<body>
+    <div class="user-controls">
+        <span class="username-display">User: {{ session.get('username', 'Guest') }}</span>
+        <a href="/logout"><button class="logout-btn">Logout</button></a>
+    </div>
+    <div id="map"></div>
     <div id="sidebar">
         <div class="controls-panel">
             <h3>Vehicle Controls</h3>
@@ -125,6 +167,11 @@
         <div id="vehicle-list">
             <p>Loading vehicle data...</p>
         </div>
+    </div>
+
+    <div class="user-controls">
+        <span class="username-display">Logged in as: <span id="username-display">User</span></span>
+        <button class="logout-btn" id="logout-btn">Logout</button>
     </div>
 
     <script>
@@ -484,6 +531,9 @@
         };
         
         fetchInitialData(); // Load existing data when page loads
+
+        // No need for custom logout JavaScript since we're using a direct link
+        // The server-side Flask route will handle the session management
     </script>
 </body>
 </html>

@@ -1,4 +1,4 @@
-from flask import Flask, render_template, Response, g, request, jsonify
+from flask import Flask, render_template, Response, g, request, jsonify, session, redirect, url_for
 import paho.mqtt.client as mqtt
 import time
 import json
@@ -20,6 +20,15 @@ HIVEMQ_USERNAME = os.getenv("HIVEMQ_USERNAME")
 HIVEMQ_PASSWORD = os.getenv("HIVEMQ_PASSWORD")
 CA_CERT_PATH = os.getenv("CA_CERT_PATH") # Will be None if not set in .env
 
+# Local user credentials - in a real app, these would be stored securely
+USERS = {
+    "admin": "fleet123",
+    "operator": "track456"
+}
+
+# Secret key for session management
+SECRET_KEY = os.getenv("SECRET_KEY", "fleet_tracking_default_key")
+
 # Check if essential variables are loaded
 if not all([HIVEMQ_HOST, HIVEMQ_USERNAME, HIVEMQ_PASSWORD]):
     print("Error: Missing HiveMQ credentials in .env file or environment variables.")
@@ -29,6 +38,7 @@ if not all([HIVEMQ_HOST, HIVEMQ_USERNAME, HIVEMQ_PASSWORD]):
 DASHBOARD_CLIENT_ID = "fleet_dashboard_client"
 
 app = Flask(__name__)
+app.secret_key = SECRET_KEY  # Set secret key for session management
 
 vehicle_data_store = {}
 data_lock = threading.Lock()
@@ -189,8 +199,42 @@ def mqtt_thread_function():
 
 @app.before_request
 def before_request():
-    """Make the MQTT client available to all routes"""
+    """Make the MQTT client available to all routes and handle authentication"""
     g.mqtt_client = getattr(app, 'mqtt_client', None)
+    
+    # Check if authentication is required
+    if request.endpoint and request.endpoint not in ['login', 'static', 'stream'] and 'logged_in' not in session:
+        # For API endpoints, return unauthorized status
+        if request.endpoint.startswith('api/'):
+            return jsonify({'status': 'error', 'message': 'Authentication required'}), 401
+        # For HTML pages, redirect to login
+        return redirect(url_for('login'))
+
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    """Handle user login"""
+    error = None
+    if request.method == 'POST':
+        username = request.form.get('username')
+        password = request.form.get('password')
+        
+        if username in USERS and USERS[username] == password:
+            session['logged_in'] = True
+            session['username'] = username
+            return redirect(url_for('index'))
+        else:
+            error = 'Invalid username or password'
+    
+    return render_template('login.html', error=error)
+
+
+@app.route('/logout', methods=['GET', 'POST'])
+def logout():
+    """Handle user logout"""
+    session.pop('logged_in', None)
+    session.pop('username', None)
+    return redirect(url_for('login'))
 
 
 @app.route('/')
