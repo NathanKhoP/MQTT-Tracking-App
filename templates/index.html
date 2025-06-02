@@ -131,7 +131,7 @@
 </head>
 <body>
     <div class="user-controls">
-        <span class="username-display">User: {{ session.get('username', 'Guest') }}</span>
+        <span class="username-display">User: {{ session.get('username', 'Guest') }} ({{ session.get('role', 'guest') }})</span>
         <a href="/logout"><button class="logout-btn">Logout</button></a>
     </div>
     <div id="map"></div>
@@ -163,15 +163,25 @@
             </div>
         </div>
         
+        {% if session.get('role') == 'admin' %}
+        <div class="controls-panel">
+            <h3>Admin Panel</h3>
+            <div style="margin-top: 10px;">
+                <a href="/register" style="text-decoration: none;">
+                    <button type="button">Add New User</button>
+                </a>
+            </div>
+            <div style="margin-top: 5px;">
+                <button type="button" onclick="showUserList()">Manage Users</button>
+                <div id="user-list" style="display: none; margin-top: 10px; max-height: 200px; overflow-y: auto;"></div>
+            </div>
+        </div>
+        {% endif %}
+        
         <h2>Vehicles</h2>
         <div id="vehicle-list">
             <p>Loading vehicle data...</p>
         </div>
-    </div>
-
-    <div class="user-controls">
-        <span class="username-display">Logged in as: <span id="username-display">User</span></span>
-        <button class="logout-btn" id="logout-btn">Logout</button>
     </div>
 
     <script>
@@ -531,6 +541,64 @@
         };
         
         fetchInitialData(); // Load existing data when page loads
+
+        // Admin functions for user management
+        async function showUserList() {
+            const userListDiv = document.getElementById('user-list');
+            
+            if (userListDiv.style.display === 'none') {
+                try {
+                    const response = await fetch('/api/users');
+                    const users = await response.json();
+                    
+                    let userHTML = '<div style="border: 1px solid #ddd; padding: 10px; background: white; border-radius: 4px;">';
+                    userHTML += '<h4>Registered Users</h4>';
+                    
+                    users.forEach(user => {
+                        userHTML += `
+                            <div style="padding: 5px; border-bottom: 1px solid #eee; display: flex; justify-content: space-between; align-items: center;">
+                                <span><strong>${user.username}</strong> (${user.role})</span>
+                                <button onclick="deleteUser('${user.username}')" style="background: #f44336; padding: 3px 8px; font-size: 12px;">Delete</button>
+                            </div>`;
+                    });
+                    
+                    userHTML += '</div>';
+                    userListDiv.innerHTML = userHTML;
+                    userListDiv.style.display = 'block';
+                } catch (error) {
+                    console.error('Error fetching users:', error);
+                    userListDiv.innerHTML = '<p style="color: red;">Error loading users</p>';
+                    userListDiv.style.display = 'block';
+                }
+            } else {
+                userListDiv.style.display = 'none';
+            }
+        }
+
+        async function deleteUser(username) {
+            if (username === 'admin') {
+                alert('Cannot delete admin user');
+                return;
+            }
+            
+            if (confirm(`Are you sure you want to delete user "${username}"?`)) {
+                try {
+                    const response = await fetch('/api/users/' + username, {
+                        method: 'DELETE'
+                    });
+                    
+                    if (response.ok) {
+                        showUserList(); // Refresh the list
+                    } else {
+                        const data = await response.json();
+                        alert('Error: ' + data.message);
+                    }
+                } catch (error) {
+                    console.error('Error deleting user:', error);
+                    alert('Error deleting user');
+                }
+            }
+        }
 
         // No need for custom logout JavaScript since we're using a direct link
         // The server-side Flask route will handle the session management

@@ -1,13 +1,16 @@
-from flask import Flask, render_template, Response, g, request, jsonify, session, redirect, url_for
+from flask import Flask, render_template, Response, g, request, jsonify, session, redirect, url_for, flash
 import paho.mqtt.client as mqtt
 import time
 import json
 import ssl
 import threading
+import datetime
 from queue import Queue
 import os # Import os
 from dotenv import load_dotenv # Import load_dotenv
 import uuid # For generating request IDs
+from flask_sqlalchemy import SQLAlchemy
+from models import db, User
 
 # Load environment variables from .env file
 load_dotenv()
@@ -20,11 +23,7 @@ HIVEMQ_USERNAME = os.getenv("HIVEMQ_USERNAME")
 HIVEMQ_PASSWORD = os.getenv("HIVEMQ_PASSWORD")
 CA_CERT_PATH = os.getenv("CA_CERT_PATH") # Will be None if not set in .env
 
-# Local user credentials - in a real app, these would be stored securely
-USERS = {
-    "admin": "fleet123",
-    "operator": "track456"
-}
+# Database is now used for user credentials instead of this dictionary
 
 # Secret key for session management
 SECRET_KEY = os.getenv("SECRET_KEY", "fleet_tracking_default_key")
@@ -39,6 +38,11 @@ DASHBOARD_CLIENT_ID = "fleet_dashboard_client"
 
 app = Flask(__name__)
 app.secret_key = SECRET_KEY  # Set secret key for session management
+
+# Configure SQLAlchemy
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///fleet_dashboard.db'
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+db.init_app(app)
 
 vehicle_data_store = {}
 data_lock = threading.Lock()
@@ -202,10 +206,16 @@ def before_request():
     """Make the MQTT client available to all routes and handle authentication"""
     g.mqtt_client = getattr(app, 'mqtt_client', None)
     
+    # Make current user role available to templates
+    g.user_role = session.get('role', None)
+    
+    # Public routes that don't require authentication
+    public_routes = ['login', 'register', 'static', 'stream']
+    
     # Check if authentication is required
-    if request.endpoint and request.endpoint not in ['login', 'static', 'stream'] and 'logged_in' not in session:
+    if request.endpoint and request.endpoint not in public_routes and 'logged_in' not in session:
         # For API endpoints, return unauthorized status
-        if request.endpoint.startswith('api/'):
+        if request.endpoint and request.endpoint.startswith('api/'):
             return jsonify({'status': 'error', 'message': 'Authentication required'}), 401
         # For HTML pages, redirect to login
         return redirect(url_for('login'))
@@ -219,9 +229,17 @@ def login():
         username = request.form.get('username')
         password = request.form.get('password')
         
-        if username in USERS and USERS[username] == password:
+        user = User.query.filter_by(username=username).first()
+        
+        if user and user.check_password(password):
             session['logged_in'] = True
             session['username'] = username
+            session['role'] = user.role
+            
+            # Update last login time
+            user.last_login = datetime.datetime.utcnow()
+            db.session.commit()
+            
             return redirect(url_for('index'))
         else:
             error = 'Invalid username or password'
@@ -234,7 +252,52 @@ def logout():
     """Handle user logout"""
     session.pop('logged_in', None)
     session.pop('username', None)
+    session.pop('role', None)
     return redirect(url_for('login'))
+
+
+@app.route('/register', methods=['GET', 'POST'])
+def register():
+    """Handle user registration"""
+    error = None
+    success = None
+    
+    # Check if the user is an admin (for role assignment) or if registration is open
+    is_admin = session.get('username') == 'admin'
+    
+    if request.method == 'POST':
+        username = request.form.get('username')
+        password = request.form.get('password')
+        confirm_password = request.form.get('confirm_password')
+        role = request.form.get('role', 'operator')  # Default to operator if not specified
+        
+        # Only allow admin roles to be set if the current user is an admin
+        if role == 'admin' and not is_admin:
+            role = 'operator'
+        
+        # Check if passwords match
+        if password != confirm_password:
+            error = "Passwords do not match"
+        else:
+            # Check if username already exists
+            existing_user = User.query.filter_by(username=username).first()
+            if existing_user:
+                error = "Username already exists"
+            else:
+                # Create new user
+                new_user = User(username=username, password=password, role=role)
+                db.session.add(new_user)
+                
+                try:
+                    db.session.commit()
+                    success = "Registration successful! You can now log in."
+                    if not session.get('logged_in'):
+                        return redirect(url_for('login'))
+                except Exception as e:
+                    db.session.rollback()
+                    error = f"Registration failed: {str(e)}"
+    
+    return render_template('register.html', error=error, success=success)
 
 
 @app.route('/')
@@ -421,9 +484,77 @@ def ping_vehicle():
     
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/users', methods=['GET'])
+def get_users():
+    """Get all users (admin only)"""
+    if session.get('role') != 'admin':
+        return jsonify({'status': 'error', 'message': 'Admin access required'}), 403
+    
+    users = User.query.all()
+    user_list = []
+    for user in users:
+        user_list.append({
+            'id': user.id,
+            'username': user.username,
+            'role': user.role,
+            'created_at': user.created_at.isoformat() if user.created_at else None,
+            'last_login': user.last_login.isoformat() if user.last_login else None
+        })
+    
+    return jsonify(user_list)
+
+
+@app.route('/api/users/<username>', methods=['DELETE'])
+def delete_user(username):
+    """Delete a user (admin only)"""
+    if session.get('role') != 'admin':
+        return jsonify({'status': 'error', 'message': 'Admin access required'}), 403
+    
+    if username == 'admin':
+        return jsonify({'status': 'error', 'message': 'Cannot delete admin user'}), 400
+    
+    user = User.query.filter_by(username=username).first()
+    if not user:
+        return jsonify({'status': 'error', 'message': 'User not found'}), 404
+    
+    try:
+        db.session.delete(user)
+        db.session.commit()
+        return jsonify({'status': 'success', 'message': 'User deleted successfully'})
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'status': 'error', 'message': str(e)}), 500
     
 
+# Create the database tables and initial admin user if they don't exist
+def initialize_database():
+    with app.app_context():
+        # Create all tables
+        db.create_all()
+        
+        # Check if admin user exists, if not create it
+        admin_user = User.query.filter_by(username='admin').first()
+        if not admin_user:
+            print("Creating initial admin user...")
+            admin_user = User(username='admin', password='fleet123', role='admin')
+            db.session.add(admin_user)
+            
+            # Add the default operator user as well for backwards compatibility
+            operator_user = User.query.filter_by(username='operator').first()
+            if not operator_user:
+                operator_user = User(username='operator', password='track456', role='operator')
+                db.session.add(operator_user)
+            
+            db.session.commit()
+            print("Initial users created successfully.")
+
 if __name__ == '__main__':
+    # Initialize the database
+    initialize_database()
+    
+    # Start MQTT thread
     mqtt_thread = threading.Thread(target=mqtt_thread_function, daemon=True)
     mqtt_thread.start()
 

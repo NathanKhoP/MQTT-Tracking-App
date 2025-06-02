@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Fleet Dashboard Login</title>
+    <title>Fleet Dashboard Registration</title>
     <style>
         body {
             font-family: Arial, sans-serif;
@@ -14,14 +14,14 @@
             height: 100vh;
             margin: 0;
         }
-        .login-container {
+        .register-container {
             background-color: white;
             padding: 40px;
             border-radius: 5px;
             box-shadow: 0 2px 10px rgba(0,0,0,0.1);
             width: 350px;
         }
-        .login-container h2 {
+        .register-container h2 {
             margin-top: 0;
             color: #333;
             text-align: center;
@@ -41,12 +41,20 @@
             border-radius: 4px;
             box-sizing: border-box;
         }
+        .form-group select {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            box-sizing: border-box;
+            background-color: white;
+        }
         .form-group .error {
             color: red;
             font-size: 0.9em;
             margin-top: 5px;
         }
-        .btn-login {
+        .btn-register {
             width: 100%;
             padding: 10px;
             background-color: #4CAF50;
@@ -56,18 +64,32 @@
             cursor: pointer;
             font-size: 1.1em;
         }
-        .btn-login:hover {
+        .btn-register:hover {
             background-color: #45a049;
+        }
+        .login-link {
+            text-align: center;
+            margin-top: 20px;
+        }
+        .login-link a {
+            color: #4CAF50;
+            text-decoration: none;
+        }
+        .login-link a:hover {
+            text-decoration: underline;
         }
     </style>
 </head>
 <body>
-    <div class="login-container">
-        <h2>Fleet Dashboard Login</h2>
+    <div class="register-container">
+        <h2>Fleet Dashboard Registration</h2>
         {% if error %}
             <p class="error" style="color: red; text-align: center;">{{ error }}</p>
         {% endif %}
-        <form action="/login" method="post">
+        {% if success %}
+            <p class="success" style="color: green; text-align: center;">{{ success }}</p>
+        {% endif %}
+        <form action="/register" method="post">
             <div class="form-group">
                 <label for="username">Username:</label>
                 <input type="text" id="username" name="username" required>
@@ -76,10 +98,23 @@
                 <label for="password">Password:</label>
                 <input type="password" id="password" name="password" required>
             </div>
-            <button type="submit" class="btn-login">Login</button>
+            <div class="form-group">
+                <label for="confirm_password">Confirm Password:</label>
+                <input type="password" id="confirm_password" name="confirm_password" required>
+            </div>
+            {% if session.get('username') == 'admin' %}
+            <div class="form-group">
+                <label for="role">Role:</label>
+                <select id="role" name="role">
+                    <option value="operator">Operator</option>
+                    <option value="admin">Administrator</option>
+                </select>
+            </div>
+            {% endif %}
+            <button type="submit" class="btn-register">Register</button>
         </form>
-        <div class="login-link" style="text-align: center; margin-top: 20px;">
-            <p>Don't have an account? <a href="/register" style="color: #4CAF50; text-decoration: none;">Register here</a></p>
+        <div class="login-link">
+            <p>Already have an account? <a href="/login">Login here</a></p>
         </div>
     </div>
 </body>
